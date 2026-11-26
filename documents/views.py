@@ -297,39 +297,34 @@ def rag_stream_view(request):
     response['Cache-Control'] = 'no-cache'
     response['X-Accel-Buffering'] = 'no'
     return response
-    def event_stream():
-        yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
-
-        full_response = []
-        try:
-            client = get_groq_client()
-            groq_stream = client.chat.completions.create(
-                model="openai/gpt-oss-20b",
-                messages=groq_messages,
-                temperature=0.2,
-                stream=True
-            )
-
-            for chunk in groq_stream:
-                delta = chunk.choices[0].delta.content or ""
-                if delta:
-                    full_response.append(delta)
-                    yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
-
-        except Exception as e:
-            error_msg = f"\n\n*(Error generating response: {str(e)})*"
-            full_response.append(error_msg)
-            yield f"data: {json.dumps({'type': 'token', 'token': error_msg})}\n\n"
-
-        complete_content = "".join(full_response)
-        Message.objects.create(
-            session=session,
-            role='assistant',
-            content=complete_content,
-            sources=sources_data
+def event_stream():
+    yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
+    full_response = []
+    try:
+        client = get_groq_client()
+        groq_stream = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=groq_messages,
+            temperature=0.2,
+            stream=True
         )
-
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        for chunk in groq_stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                full_response.append(delta)
+                yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
+    except Exception as e:
+        error_msg = f"\n\n*(Error generating response: {str(e)})*"
+        full_response.append(error_msg)
+        yield f"data: {json.dumps({'type': 'token', 'token': error_msg})}\n\n"
+    complete_content = "".join(full_response)
+    Message.objects.create(
+        session=session,
+        role='assistant',
+        content=complete_content,
+        sources=sources_data
+    )
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
     response['Cache-Control'] = 'no-cache'
