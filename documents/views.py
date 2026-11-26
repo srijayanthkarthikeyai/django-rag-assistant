@@ -35,17 +35,37 @@ def get_groq_client():
         raise ValueError("GROQ_API_KEY is not set in environment variables.")
     return Groq(api_key=api_key)
 
+import time
+from google.genai.errors import APIError
 
-def get_embeddings(texts: list[str]) -> list[list[float]]:
-    """Fetches 384-d embeddings remotely via Google Gemini API."""
+def get_embeddings(texts: list[str], batch_size: int = 50) -> list[list[float]]:
+    """Fetches 384-d embeddings in paced batches with automatic 429 retry."""
     client = get_gemini_client()
-    result = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=texts,
-        config=types.EmbedContentConfig(output_dimensionality=384)
-    )
-    return [emb.values for emb in result.embeddings]
+    all_embeddings = []
 
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+
+        for attempt in range(4):
+            try:
+                result = client.models.embed_content(
+                    model="gemini-embedding-001",
+                    contents=batch,
+                    config=types.EmbedContentConfig(output_dimensionality=384)
+                )
+                all_embeddings.extend([emb.values for emb in result.embeddings])
+                break
+            except APIError as e:
+                if e.code == 429 and attempt < 3:
+                    time.sleep(15 * (attempt + 1))  # Wait 15s, 30s, 45s on quota hit
+                else:
+                    raise
+
+        # Pace requests to stay under free-tier 30k TPM
+        if i + batch_size < len(texts):
+            time.sleep(2.5)
+
+    return all_embeddings
 
 def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]:
     """Splits plain text into overlapping sliding-window character chunks."""
@@ -296,7 +316,7 @@ def upload_document_view(request):
     except Exception as e:
         return JsonResponse({"error": f"Failed to extract text: {str(e)}"}, status=500)
 
-    chunks = chunk_text(raw_text, chunk_size=300, overlap=50)
+    chunks = chunk_text(raw_text, chunk_size=1200, overlap=150)
     if not chunks:
         return JsonResponse({"error": "No readable text extracted"}, status=400)
 
