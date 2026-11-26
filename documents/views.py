@@ -404,22 +404,24 @@ def document_list_view(request):
 @login_required
 @require_http_methods(["POST"])
 def document_delete_view(request):
-    """Deletes all chunks of an uploaded file."""
+    """Completely removes all chunks and vector embeddings of an uploaded file."""
     try:
         data = json.loads(request.body)
-        filename = data.get("filename")
+        filename = data.get("filename", "").strip()
     except json.JSONDecodeError:
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
     if not filename:
         return JsonResponse({"error": "Filename required"}, status=400)
 
+    # Match exact filename or "<filename> (Part N)" chunks owned by this user
     deleted_count, _ = Document.objects.filter(
-        user=request.user,
-        title__startswith=filename
+        user=request.user
+    ).filter(
+        Q(title=filename) | Q(title__startswith=f"{filename} (Part ")
     ).delete()
 
     return JsonResponse({
-        "message": f"Successfully deleted '{filename}'",
+        "message": f"Permanently deleted '{filename}' and its embeddings.",
         "chunks_removed": deleted_count
     })
