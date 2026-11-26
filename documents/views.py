@@ -192,6 +192,8 @@ def session_detail_view(request, session_id):
 
 # 🌊 Streaming RAG View
 @login_required
+# 🌊 Streaming RAG View
+@login_required
 def rag_stream_view(request):
     if request.method != "POST":
         return JsonResponse({"error": "Only POST allowed"}, status=405)
@@ -206,52 +208,95 @@ def rag_stream_view(request):
     if not query_text:
         return JsonResponse({"error": "Query cannot be empty"}, status=400)
 
-    if session_id:
-        try:
-            session = Session.objects.get(id=session_id, user=request.user)
-        except (Session.DoesNotExist, ValueError):
-            session = Session.objects.create(user=request.user)
-    else:
-        session = Session.objects.create(user=request.user)
-
-    # 🏷️ Auto-generate title using LLM on the first message
-    if session.messages.count() == 0:
-        session.title = generate_chat_title(query_text)
-        session.save()
-
-    Message.objects.create(session=session, role='user', content=query_text)
-
-    # 🔍 Hybrid retrieval
     try:
-        hybrid_results = retrieve_hybrid_documents(query_text, request.user)
-    except Exception:
-        hybrid_results = []
+        if session_id:
+            try:
+                session = Session.objects.get(id=session_id, user=request.user)
+            except (Session.DoesNotExist, ValueError):
+                session = Session.objects.create(user=request.user)
+        else:
+            session = Session.objects.create(user=request.user)
 
-    sources_data = [
-        {"title": item["doc"].title, "distance": item["distance"]}
-        for item in hybrid_results
-    ]
-    context_text = "\n\n".join([
-        f"[{item['doc'].title}]\n{item['doc'].content}"
-        for item in hybrid_results
-    ])
+        # 🏷️ Auto-generate title using LLM on the first message
+        if session.messages.count() == 0:
+            session.title = generate_chat_title(query_text)
+            session.save()
 
-    past_messages = list(session.messages.exclude(id=session.messages.last().id).order_by('created_at'))
-    groq_messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful knowledge assistant. Use the provided context to answer the question. "
-                "If no context is provided or relevant, answer using your general knowledge politely."
+        user_msg = Message.objects.create(session=session, role='user', content=query_text)
+
+        # 🔍 Hybrid retrieval
+        try:
+            hybrid_results = retrieve_hybrid_documents(query_text, request.user)
+        except Exception:
+            hybrid_results = []
+
+        sources_data = [
+            {"title": item["doc"].title, "distance": item["distance"]}
+            for item in hybrid_results
+        ]
+        context_text = "\n\n".join([
+            f"[{item['doc'].title}]\n{item['doc'].content}"
+            for item in hybrid_results
+        ])
+
+        past_messages = list(session.messages.exclude(id=user_msg.id).order_by('created_at'))
+        groq_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful knowledge assistant. Use the provided context to answer the question. "
+                    "If no context is provided or relevant, answer using your general knowledge politely."
+                )
+            }
+        ]
+        for msg in past_messages:
+            groq_messages.append({"role": msg.role, "content": msg.content})
+
+        user_prompt = f"Context:\n{context_text}\n\nQuestion: {query_text}" if context_text else query_text
+        groq_messages.append({"role": "user", "content": user_prompt})
+
+    except Exception as e:
+        print(traceback.format_exc(), flush=True)
+        return JsonResponse({"error": f"{type(e).__name__}: {str(e)}"}, status=500)
+
+    def event_stream():
+        yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
+
+        full_response = []
+        try:
+            client = get_groq_client()
+            groq_stream = client.chat.completions.create(
+                model="openai/gpt-oss-20b",
+                messages=groq_messages,
+                temperature=0.2,
+                stream=True
             )
-        }
-    ]
-    for msg in past_messages:
-        groq_messages.append({"role": msg.role, "content": msg.content})
 
-    user_prompt = f"Context:\n{context_text}\n\nQuestion: {query_text}" if context_text else query_text
-    groq_messages.append({"role": "user", "content": user_prompt})
+            for chunk in groq_stream:
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    full_response.append(delta)
+                    yield f"data: {json.dumps({'type': 'token', 'token': delta})}\n\n"
 
+        except Exception as e:
+            error_msg = f"\n\n*(Error generating response: {str(e)})*"
+            full_response.append(error_msg)
+            yield f"data: {json.dumps({'type': 'token', 'token': error_msg})}\n\n"
+
+        complete_content = "".join(full_response)
+        Message.objects.create(
+            session=session,
+            role='assistant',
+            content=complete_content,
+            sources=sources_data
+        )
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response['Cache-Control'] = 'no-cache'
+    response['X-Accel-Buffering'] = 'no'
+    return response
     def event_stream():
         yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
 
