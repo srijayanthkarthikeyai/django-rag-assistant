@@ -12,28 +12,39 @@ from django.views.decorators.http import require_http_methods
 from django.db.models import Q
 from django.contrib.postgres.search import SearchVector, SearchQuery, SearchRank
 from pgvector.django import CosineDistance
-from huggingface_hub import InferenceClient
+from google import genai
+from google.genai import types
 from groq import Groq
 from pypdf import PdfReader
 from .models import Document, Session, Message
 
-# 🧠 Lightweight API Clients Initialization (No heavy local PyTorch model in RAM)
-GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
-groq_client = Groq(api_key=GROQ_KEY)
-
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
-hf_client = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
-
 SIMILARITY_THRESHOLD = 0.65
 
 
+# 🧠 Lazy API Client Helpers (Safe for Render builds and .env loading)
+def get_gemini_client():
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY is not set in environment variables.")
+    return genai.Client(api_key=api_key)
+
+
+def get_groq_client():
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is not set in environment variables.")
+    return Groq(api_key=api_key)
+
+
 def get_embeddings(texts: list[str]) -> list[list[float]]:
-    """Fetches 384-d embeddings remotely via Hugging Face Inference API."""
-    result = hf_client.feature_extraction(
-        texts,
-        model="sentence-transformers/all-MiniLM-L6-v2"
+    """Fetches 384-d embeddings remotely via Google Gemini API."""
+    client = get_gemini_client()
+    result = client.models.embed_content(
+        model="gemini-embedding-001",
+        contents=texts,
+        config=types.EmbedContentConfig(output_dimensionality=384)
     )
-    return result.tolist()
+    return [emb.values for emb in result.embeddings]
 
 
 def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]:
@@ -53,7 +64,8 @@ def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list[str]
 def generate_chat_title(first_query: str) -> str:
     """Uses Groq to create a concise 3-5 word conversation title."""
     try:
-        completion = groq_client.chat.completions.create(
+        client = get_groq_client()
+        completion = client.chat.completions.create(
             model="openai/gpt-oss-20b",
             messages=[
                 {
@@ -192,7 +204,7 @@ def rag_stream_view(request):
     # 🔍 Hybrid retrieval
     try:
         hybrid_results = retrieve_hybrid_documents(query_text, request.user)
-    except Exception as e:
+    except Exception:
         hybrid_results = []
 
     sources_data = [
@@ -225,7 +237,8 @@ def rag_stream_view(request):
 
         full_response = []
         try:
-            groq_stream = groq_client.chat.completions.create(
+            client = get_groq_client()
+            groq_stream = client.chat.completions.create(
                 model="openai/gpt-oss-20b",
                 messages=groq_messages,
                 temperature=0.2,
