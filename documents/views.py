@@ -190,9 +190,6 @@ def session_detail_view(request, session_id):
     return JsonResponse({"error": "Method not allowed"}, status=405)
 
 
-# 🌊 Streaming RAG View
-@login_required
-# 🌊 Streaming RAG View
 @login_required
 def rag_stream_view(request):
     if request.method != "POST":
@@ -240,19 +237,27 @@ def rag_stream_view(request):
         ])
 
         past_messages = list(session.messages.exclude(id=user_msg.id).order_by('created_at'))
-        groq_messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful knowledge assistant. Use the provided context to answer the question. "
-                    "If no context is provided or relevant, answer using your general knowledge politely."
-                )
-            }
-        ]
-        for msg in past_messages:
-            groq_messages.append({"role": msg.role, "content": msg.content})
 
-        user_prompt = f"Context:\n{context_text}\n\nQuestion: {query_text}" if context_text else query_text
+        if context_text:
+            system_prompt = (
+                "You are a strict document assistant. Answer the user's question ONLY using the "
+                "provided Context below. Do not use any outside or general knowledge. If the answer "
+                "is not explicitly contained in the Context, reply: "
+                "'I cannot find that information in your uploaded documents.'"
+            )
+            user_prompt = f"Context:\n{context_text}\n\nQuestion: {query_text}"
+        else:
+            system_prompt = (
+                "You are a strict document assistant. No matching documents were found in the user's "
+                "knowledge base. Do NOT answer the question from general knowledge or prior conversation "
+                "history. Reply ONLY with: 'I cannot answer this because no matching uploaded document was found.'"
+            )
+            user_prompt = query_text
+
+        groq_messages = [{"role": "system", "content": system_prompt}]
+        if context_text:
+            for msg in past_messages:
+                groq_messages.append({"role": msg.role, "content": msg.content})
         groq_messages.append({"role": "user", "content": user_prompt})
 
     except Exception as e:
@@ -297,6 +302,8 @@ def rag_stream_view(request):
     response['Cache-Control'] = 'no-cache'
     response['X-Accel-Buffering'] = 'no'
     return response
+
+   
 def event_stream():
     yield f"data: {json.dumps({'type': 'sources', 'sources': sources_data})}\n\n"
     full_response = []
